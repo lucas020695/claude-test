@@ -100,14 +100,27 @@ def _delta_color(v):
     return {"color": GREEN if v >= 0 else RED, "fontWeight": "600"}
 
 
-# ── SVG logo (inline, Dash-4 safe) ───────────────────────────────────────────
-LOGO_SVG = (
-    '<svg viewBox="0 0 32 32" width="32" height="32" xmlns="http://www.w3.org/2000/svg">'
-    f'<rect width="32" height="32" rx="6" fill="{TEAL}"/>'
-    '<text x="16" y="22" text-anchor="middle" font-size="18" font-weight="700" '
-    'fill="white" font-family="monospace">X</text>'
-    '</svg>'
-)
+# ── CSS logo (pure div, Dash-4 safe) ───────────────────────────────────────────
+def logo_mark():
+    return html.Div([
+        # Teal rounded square with "X"
+        html.Div(
+            "X",
+            style={
+                "width": "32px", "height": "32px",
+                "background": TEAL, "borderRadius": "6px",
+                "display": "flex", "alignItems": "center", "justifyContent": "center",
+                "color": "white", "fontWeight": "700", "fontSize": "18px",
+                "fontFamily": "monospace", "flexShrink": "0",
+                "marginRight": "10px",
+            }
+        ),
+        html.Div([
+            html.Div("XPerf",     style={"fontWeight": "700", "fontSize": "0.95rem",
+                                          "color": TEXT, "lineHeight": "1.2"}),
+            html.Div("Validator", style={"fontSize": "0.7rem", "color": MUTED}),
+        ])
+    ], style={"display": "flex", "alignItems": "center", "marginBottom": "26px"})
 
 
 # ── KPI card ──────────────────────────────────────────────────────────────────
@@ -240,19 +253,7 @@ MAIN = {
 app.layout = html.Div([
     # ── Sidebar ───────────────────────────────────────────────────────────────
     html.Div([
-        # Logo — inline SVG via dangerously_allow_html
-        html.Div([
-            html.Div(
-                dangerously_allow_html=True,
-                children=LOGO_SVG,
-                style={"marginRight": "10px", "flexShrink": "0", "lineHeight": "0"},
-            ),
-            html.Div([
-                html.Div("XPerf",     style={"fontWeight": "700", "fontSize": "0.95rem",
-                                              "color": TEXT, "lineHeight": "1.2"}),
-                html.Div("Validator", style={"fontSize": "0.7rem", "color": MUTED}),
-            ])
-        ], style={"display": "flex", "alignItems": "center", "marginBottom": "26px"}),
+        logo_mark(),
 
         html.P("Account", style={"fontSize": "0.68rem", "color": MUTED,
                                   "textTransform": "uppercase",
