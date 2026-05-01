@@ -1,11 +1,10 @@
 """
 fetchers/cvm.py
 ===============
-Fetch investment fund daily quotas from the CVM (Brazilian SEC) open data API.
+Fetch investment fund daily quotas from the CVM (Brazilian SEC) open data portal.
 
-Endpoints:
-  https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS/
-    inf_diario_fi_YYYYMM.csv  — monthly files with daily NAV per fund
+CVM distributes monthly ZIP files containing a CSV inside:
+  https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS/inf_diario_fi_YYYYMM.zip
 
 Fields used:
   CNPJ_FUNDO  — 14-digit CNPJ (no punctuation)
@@ -14,26 +13,40 @@ Fields used:
 """
 
 import io
+import zipfile
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import pandas as pd
 from datetime import date
 from functools import lru_cache
 
-CVM_BASE = "https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS/inf_diario_fi_{ym}.csv"
+CVM_BASE = "https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS/inf_diario_fi_{ym}.zip"
 
-# Browser-like headers to avoid 403 from dados.cvm.gov.br
-_HEADERS = {
+# Persistent session with retries and browser-like headers
+_SESSION = requests.Session()
+_SESSION.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://dados.cvm.gov.br/",
-    "Connection": "keep-alive",
-}
+    "Referer": "https://dados.cvm.gov.br/dataset/fi-doc-inf_diario",
+})
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+_SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
+
+# Warm up session by visiting the dataset page first (sets cookies)
+def _warm_session():
+    try:
+        _SESSION.get("https://dados.cvm.gov.br/dataset/fi-doc-inf_diario", timeout=15)
+    except Exception:
+        pass
+
+_warm_session()
 
 # ── Pre-populated CNPJ map (fund name → 14-digit CNPJ) ────────────────────────
 FUND_CNPJ_MAP: dict[str, str] = {
@@ -74,15 +87,8 @@ FUND_CNPJ_MAP: dict[str, str] = {
 
 
 def resolve_cnpj(fund_name: str) -> str | None:
-    """
-    Resolve a fund name to its CNPJ.
-    1. Exact match in FUND_CNPJ_MAP.
-    2. Fuzzy match (requires rapidfuzz).
-    Returns None if unresolved.
-    """
     if fund_name in FUND_CNPJ_MAP:
         return FUND_CNPJ_MAP[fund_name]
-
     try:
         from rapidfuzz import process, fuzz
         match, score, _ = process.extractOne(
@@ -93,43 +99,41 @@ def resolve_cnpj(fund_name: str) -> str | None:
             return FUND_CNPJ_MAP[match]
     except ImportError:
         pass
-
     return None
 
 
 @lru_cache(maxsize=64)
 def _fetch_monthly_csv(ym: str) -> pd.DataFrame:
     """
-    Fetch and cache CVM monthly CSV for year-month string 'YYYYMM'.
-    Returns a DataFrame with columns [CNPJ_FUNDO, DT_COMPTC, VL_QUOTA].
+    Download CVM ZIP for year-month 'YYYYMM', extract the CSV inside,
+    and return a DataFrame with [CNPJ_FUNDO, DT_COMPTC, VL_QUOTA].
     """
     url = CVM_BASE.format(ym=ym)
-    resp = requests.get(url, headers=_HEADERS, timeout=60)
+    resp = _SESSION.get(url, timeout=90)
     if resp.status_code == 404:
         return pd.DataFrame(columns=["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"])
     resp.raise_for_status()
 
-    # CVM files use semicolon separator and latin-1 encoding
-    df = pd.read_csv(
-        io.BytesIO(resp.content),
-        sep=";",
-        encoding="latin-1",
-        usecols=["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"],
-        dtype={"CNPJ_FUNDO": str},
-        parse_dates=["DT_COMPTC"],
-    )
+    # Decompress ZIP in memory
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        csv_name = next(n for n in zf.namelist() if n.endswith(".csv"))
+        with zf.open(csv_name) as f:
+            df = pd.read_csv(
+                f,
+                sep=";",
+                encoding="latin-1",
+                usecols=["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"],
+                dtype={"CNPJ_FUNDO": str},
+                parse_dates=["DT_COMPTC"],
+            )
+
     df["CNPJ_FUNDO"] = df["CNPJ_FUNDO"].str.replace(r"[.\-/]", "", regex=True)
     return df
 
 
 def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
-    """
-    Build a daily quota price series for a fund CNPJ between start and end.
-    Fetches monthly CVM CSVs as needed.
-    """
     cnpj_clean = cnpj.replace(".", "").replace("-", "").replace("/", "")
     frames = []
-
     cur = date(start.year, start.month, 1)
     while cur <= end:
         ym = cur.strftime("%Y%m")
@@ -138,13 +142,9 @@ def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
             mask = df["CNPJ_FUNDO"] == cnpj_clean
             fund_df = df[mask].copy()
             if not fund_df.empty:
-                fund_df = fund_df.sort_values("DT_COMPTC")
-                s = fund_df.set_index("DT_COMPTC")["VL_QUOTA"].astype(float)
+                s = fund_df.sort_values("DT_COMPTC").set_index("DT_COMPTC")["VL_QUOTA"].astype(float)
                 frames.append(s)
-        if cur.month == 12:
-            cur = date(cur.year + 1, 1, 1)
-        else:
-            cur = date(cur.year, cur.month + 1, 1)
+        cur = date(cur.year + (cur.month == 12), (cur.month % 12) + 1, 1)
 
     if not frames:
         return pd.Series(dtype=float)
@@ -157,23 +157,12 @@ def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
     return series.drop_duplicates()
 
 
-def compute_fund_return(
-    cnpj: str,
-    start: date,
-    end: date,
-) -> float | None:
-    """
-    Compute total return for a CVM-registered fund between start and end.
-    Returns decimal return, e.g. 0.1055 for 10.55%, or None on failure.
-    """
+def compute_fund_return(cnpj: str, start: date, end: date) -> float | None:
     series = _get_quota_series(cnpj, start, end)
     if len(series) < 2:
         return None
-
     q_start = series.iloc[0]
     q_end   = series.iloc[-1]
-
     if q_start == 0:
         return None
-
     return float(q_end / q_start - 1)
