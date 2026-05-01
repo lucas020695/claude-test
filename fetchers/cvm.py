@@ -21,8 +21,21 @@ from functools import lru_cache
 
 CVM_BASE = "https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS/inf_diario_fi_{ym}.csv"
 
-# ── Pre-populated CNPJ map (fund name → 14-digit CNPJ) ───────────────────────
-# Extend this dict when new funds are added.
+# Browser-like headers to avoid 403 from dados.cvm.gov.br
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://dados.cvm.gov.br/",
+    "Connection": "keep-alive",
+}
+
+# ── Pre-populated CNPJ map (fund name → 14-digit CNPJ) ────────────────────────
 FUND_CNPJ_MAP: dict[str, str] = {
     # Pós Fixado
     "Trend DI Simples FI":               "34534196000133",
@@ -91,7 +104,7 @@ def _fetch_monthly_csv(ym: str) -> pd.DataFrame:
     Returns a DataFrame with columns [CNPJ_FUNDO, DT_COMPTC, VL_QUOTA].
     """
     url = CVM_BASE.format(ym=ym)
-    resp = requests.get(url, timeout=60)
+    resp = requests.get(url, headers=_HEADERS, timeout=60)
     if resp.status_code == 404:
         return pd.DataFrame(columns=["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"])
     resp.raise_for_status()
@@ -117,7 +130,6 @@ def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
     cnpj_clean = cnpj.replace(".", "").replace("-", "").replace("/", "")
     frames = []
 
-    # Iterate through months in range
     cur = date(start.year, start.month, 1)
     while cur <= end:
         ym = cur.strftime("%Y%m")
@@ -129,7 +141,6 @@ def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
                 fund_df = fund_df.sort_values("DT_COMPTC")
                 s = fund_df.set_index("DT_COMPTC")["VL_QUOTA"].astype(float)
                 frames.append(s)
-        # Advance month
         if cur.month == 12:
             cur = date(cur.year + 1, 1, 1)
         else:
@@ -139,7 +150,6 @@ def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
         return pd.Series(dtype=float)
 
     series = pd.concat(frames).sort_index()
-    # Filter to exact date range
     series = series[
         (series.index >= pd.Timestamp(start)) &
         (series.index <= pd.Timestamp(end))
@@ -160,7 +170,6 @@ def compute_fund_return(
     if len(series) < 2:
         return None
 
-    # Use first available quote on or after start, last on or before end
     q_start = series.iloc[0]
     q_end   = series.iloc[-1]
 
