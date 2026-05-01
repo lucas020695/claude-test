@@ -3,11 +3,11 @@ fetchers/cvm.py
 ===============
 Fetch investment fund daily quotas from the CVM (Brazilian SEC) open data portal.
 
-CVM distributes monthly ZIP files containing a CSV inside:
+CVM distributes monthly ZIP files:
   https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS/inf_diario_fi_YYYYMM.zip
 
-Fields used:
-  CNPJ_FUNDO  — 14-digit CNPJ (no punctuation)
+Key columns (confirmed schema):
+  CNPJ_FUNDO  — 14-digit CNPJ (no punctuation in newer files)
   DT_COMPTC   — date YYYY-MM-DD
   VL_QUOTA    — NAV per share (quota)
 """
@@ -23,7 +23,7 @@ from functools import lru_cache
 
 CVM_BASE = "https://dados.cvm.gov.br/dados/FI/DOC/INF_DIARIO/DADOS/inf_diario_fi_{ym}.zip"
 
-# Persistent session with retries and browser-like headers
+# Persistent session with retries and browser headers
 _SESSION = requests.Session()
 _SESSION.headers.update({
     "User-Agent": (
@@ -39,26 +39,33 @@ _SESSION.headers.update({
 _retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
 _SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
 
-# Warm up session by visiting the dataset page first (sets cookies)
-def _warm_session():
-    try:
-        _SESSION.get("https://dados.cvm.gov.br/dataset/fi-doc-inf_diario", timeout=15)
-    except Exception:
-        pass
+try:
+    _SESSION.get("https://dados.cvm.gov.br/dataset/fi-doc-inf_diario", timeout=15)
+except Exception:
+    pass
 
-_warm_session()
+# Column name aliases (CVM has changed names across years)
+_COL_CNPJ  = ["CNPJ_FUNDO"]
+_COL_DATE  = ["DT_COMPTC"]
+_COL_QUOTA = ["VL_QUOTA"]
 
-# ── Pre-populated CNPJ map (fund name → 14-digit CNPJ) ────────────────────────
+
+def _find_col(df: pd.DataFrame, candidates: list[str]) -> str:
+    """Return the first matching column name (case-insensitive)."""
+    cols_upper = {c.upper(): c for c in df.columns}
+    for c in candidates:
+        if c.upper() in cols_upper:
+            return cols_upper[c.upper()]
+    raise KeyError(f"None of {candidates} found in columns: {list(df.columns)}")
+
+
+# ── Pre-populated CNPJ map ──────────────────────────────────────────────────────────
 FUND_CNPJ_MAP: dict[str, str] = {
-    # Pós Fixado
     "Trend DI Simples FI":               "34534196000133",
     "Itaú Referenciado DI Especial":      "73232900000148",
-    # Inflação
     "XP Debentures Incentivadas":         "11858506000108",
     "ARX Elbrus FIC FIM":                 "16534696000178",
-    # Pré Fixado
     "BB RF CP LP FI":                     "00970698000153",
-    # Multimercado
     "Verde Asset Management":             "22187946000102",
     "Giant Zarathustra":                  "14181411000150",
     "Kinea Atlas":                        "12808980000139",
@@ -69,16 +76,13 @@ FUND_CNPJ_MAP: dict[str, str] = {
     "Ibiuna Long Short STLS FIC FIM":     "10765398000166",
     "JGP Strategy FIC FIM":               "08827501000126",
     "Absolute Vertex FIC FIM":            "11042711000190",
-    # Renda Variável Brasil
     "Alaska Black BDR Nível I":           "14096710000164",
     "Dynamo Cougar FI Ações":             "52287035000155",
     "Bogari Value FIC FIA":               "11039484000130",
     "Constellation Compounders FIC FIA":  "20530089000124",
     "Trígono Flagship Small Caps FIC FIA":"30330089000100",
-    # Renda Variável Global
     "Schroder Retorno Total FI":          "35696762000134",
     "AZ Quest Total Return FIC FIA":      "22844879000128",
-    # Crédito Privado
     "BTG Pactual Yield DI FI RF CP":      "36248791000118",
     "Santander FI RF CP LP":              "01765602000174",
     "Itaú Personnalité IB FI RF":         "17328059000156",
@@ -105,8 +109,8 @@ def resolve_cnpj(fund_name: str) -> str | None:
 @lru_cache(maxsize=64)
 def _fetch_monthly_csv(ym: str) -> pd.DataFrame:
     """
-    Download CVM ZIP for year-month 'YYYYMM', extract the CSV inside,
-    and return a DataFrame with [CNPJ_FUNDO, DT_COMPTC, VL_QUOTA].
+    Download CVM ZIP for 'YYYYMM', extract CSV, return standardised DataFrame
+    with columns [CNPJ_FUNDO, DT_COMPTC, VL_QUOTA].
     """
     url = CVM_BASE.format(ym=ym)
     resp = _SESSION.get(url, timeout=90)
@@ -114,21 +118,24 @@ def _fetch_monthly_csv(ym: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"])
     resp.raise_for_status()
 
-    # Decompress ZIP in memory
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        csv_name = next(n for n in zf.namelist() if n.endswith(".csv"))
+        csv_name = next(n for n in zf.namelist() if n.lower().endswith(".csv"))
         with zf.open(csv_name) as f:
-            df = pd.read_csv(
-                f,
-                sep=";",
-                encoding="latin-1",
-                usecols=["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"],
-                dtype={"CNPJ_FUNDO": str},
-                parse_dates=["DT_COMPTC"],
-            )
+            # Read ALL columns — avoids usecols mismatch errors
+            df = pd.read_csv(f, sep=";", encoding="latin-1", dtype=str)
 
-    df["CNPJ_FUNDO"] = df["CNPJ_FUNDO"].str.replace(r"[.\-/]", "", regex=True)
-    return df
+    # Normalise column names and pick the three we need
+    df.columns = [c.strip() for c in df.columns]
+    col_cnpj  = _find_col(df, _COL_CNPJ)
+    col_date  = _find_col(df, _COL_DATE)
+    col_quota = _find_col(df, _COL_QUOTA)
+
+    out = df[[col_cnpj, col_date, col_quota]].copy()
+    out.columns = ["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"]
+    out["CNPJ_FUNDO"] = out["CNPJ_FUNDO"].str.replace(r"[.\-/]", "", regex=True).str.strip()
+    out["DT_COMPTC"]  = pd.to_datetime(out["DT_COMPTC"], errors="coerce")
+    out["VL_QUOTA"]   = pd.to_numeric(out["VL_QUOTA"].str.replace(",", "."), errors="coerce")
+    return out.dropna(subset=["DT_COMPTC", "VL_QUOTA"])
 
 
 def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
@@ -137,12 +144,15 @@ def _get_quota_series(cnpj: str, start: date, end: date) -> pd.Series:
     cur = date(start.year, start.month, 1)
     while cur <= end:
         ym = cur.strftime("%Y%m")
-        df = _fetch_monthly_csv(ym)
+        try:
+            df = _fetch_monthly_csv(ym)
+        except Exception:
+            df = pd.DataFrame(columns=["CNPJ_FUNDO", "DT_COMPTC", "VL_QUOTA"])
         if not df.empty:
             mask = df["CNPJ_FUNDO"] == cnpj_clean
-            fund_df = df[mask].copy()
+            fund_df = df[mask]
             if not fund_df.empty:
-                s = fund_df.sort_values("DT_COMPTC").set_index("DT_COMPTC")["VL_QUOTA"].astype(float)
+                s = fund_df.sort_values("DT_COMPTC").set_index("DT_COMPTC")["VL_QUOTA"]
                 frames.append(s)
         cur = date(cur.year + (cur.month == 12), (cur.month % 12) + 1, 1)
 
@@ -163,6 +173,6 @@ def compute_fund_return(cnpj: str, start: date, end: date) -> float | None:
         return None
     q_start = series.iloc[0]
     q_end   = series.iloc[-1]
-    if q_start == 0:
+    if q_start == 0 or pd.isna(q_start):
         return None
     return float(q_end / q_start - 1)
