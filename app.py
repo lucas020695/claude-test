@@ -100,6 +100,16 @@ def _delta_color(v):
     return {"color": GREEN if v >= 0 else RED, "fontWeight": "600"}
 
 
+# ── SVG logo (inline, Dash-4 safe) ───────────────────────────────────────────
+LOGO_SVG = (
+    '<svg viewBox="0 0 32 32" width="32" height="32" xmlns="http://www.w3.org/2000/svg">'
+    f'<rect width="32" height="32" rx="6" fill="{TEAL}"/>'
+    '<text x="16" y="22" text-anchor="middle" font-size="18" font-weight="700" '
+    'fill="white" font-family="monospace">X</text>'
+    '</svg>'
+)
+
+
 # ── KPI card ──────────────────────────────────────────────────────────────────
 def kpi_card(title, value, sub=None, badge=None):
     badge_el = html.Span() if badge is None else html.Span(
@@ -140,7 +150,7 @@ def return_table(result):
             html.Td(_p(cdi_acc)),
         ]))
     hdr = html.Thead(html.Tr([
-        html.Th(c) for c in ["Window","PDF Return","Calc Return","Δ bps","PDF % CDI","Calc % CDI","CDI (period)"]
+        html.Th(c) for c in ["Window","PDF Return","Calc Return","\u0394 bps","PDF % CDI","Calc % CDI","CDI (period)"]
     ]), style={"borderBottom": f"2px solid {TEAL}", "color": MUTED,
                "fontSize": "0.72rem", "textTransform": "uppercase",
                "letterSpacing": "0.05em"})
@@ -230,16 +240,13 @@ MAIN = {
 app.layout = html.Div([
     # ── Sidebar ───────────────────────────────────────────────────────────────
     html.Div([
-        # Logo
+        # Logo — inline SVG via dangerously_allow_html
         html.Div([
-            html.Svg([
-                html.Rect(width="32", height="32", rx="6", **{"fill": TEAL}),
-                html.Text("X", x="16", y="22",
-                          **{"textAnchor": "middle", "fontSize": "18",
-                             "fontWeight": "700", "fill": "white",
-                             "fontFamily": "monospace"}),
-            ], viewBox="0 0 32 32", width="32", height="32",
-               style={"marginRight": "10px", "flexShrink": "0"}),
+            html.Div(
+                dangerously_allow_html=True,
+                children=LOGO_SVG,
+                style={"marginRight": "10px", "flexShrink": "0", "lineHeight": "0"},
+            ),
             html.Div([
                 html.Div("XPerf",     style={"fontWeight": "700", "fontSize": "0.95rem",
                                               "color": TEXT, "lineHeight": "1.2"}),
